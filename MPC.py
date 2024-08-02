@@ -1,36 +1,33 @@
 import numpy as np
+import torch
 
 
-def objectives(U_list, trainu_con, trainx_con, model, sc_x, sc_d, sc_i, target):
+def objectives(U_list, trainu_con, trainx_con, model, sc_d, sc_f, target):
     # U_list: multiple valve setting combinations
     # trainu_con: include control inputs, 
-    # [0, 1, 2, 3, 4, 5, 9, 10, 11, 12] are the delayed variables, 
-    # [6, 7, 8] are the instant variables
-    delay_data = np.zeros((len(U_list), 120, 10))
+    # trainx_con: frequency data
+    delay_data = np.zeros((len(U_list), 60, 12))
     for i in range(len(U_list)):
         u1 = U_list[i][0]
         u2 = U_list[i][1]
         
-        delay1 = trainu_con[0:120,[0, 1, 2, 3, 4, 5, 9, 10, 11, 12]] 
-        delay1[60:,0:8] = delay1[59,0:8] # untunable variables, unknown for the last 60 points
-        delay1[60:,8] = u1 # CV2 setting
-        delay1[60:,9] = u2 # CV3 setting
-        delay1 = sc_d.transform(delay1).reshape((1,120,10))
+        delay1 = np.zeros((len(trainx_con), 12))
+        delay1[:, 0:10] = trainu_con
+        delay1[:, 10] = u1 # CV2 setting
+        delay1[:, 11] = u2 # CV3 setting
+        delay1 = sc_d.transform(delay1).reshape((1,60,12))
         delay_data[i,:,:] = delay1[0,:,:]
 
-    instant1 = trainu_con[59, [6, 7, 8]] # instant variables 
     frq1 = trainx_con[:60,:] # recorded frequency 
     
-    instant1 = sc_i.transform(instant1.reshape((1,3)))
-    frq1 = sc_x.transform(frq1.reshape((60,1))).reshape((1,60))
+    frq1 = sc_f.transform(frq1.reshape((60,1))).reshape((1,60))
     
-    instant_data = np.tile(instant1, (len(U_list), 1))
     frq_data = np.tile(frq1, (len(U_list), 1))
 
-    optimized_f = model.predict([delay_data, instant_data, frq_data]) # predictions
+    optimized_f = model(torch.tensor(delay_data).float(), torch.tensor(frq_data).float()).detach().numpy()
     err_list = []
     for i in range(len(U_list)):
-        optimized_f_real = sc_x.inverse_transform(optimized_f[i].reshape(60,1))
+        optimized_f_real = sc_f.inverse_transform(optimized_f[i].reshape(60,1))
         optimized_f_real_sq = optimized_f_real**2
         # weights = np.geomspace(1, 1000, 60)
         weights = np.ones(60)
@@ -39,29 +36,38 @@ def objectives(U_list, trainu_con, trainx_con, model, sc_x, sc_d, sc_i, target):
         err_list.append(weighted_sum)
     return err_list
 
-def getfreq(u1, u2, trainx_con, trainu_con, model, sc_x, sc_d, sc_i, target):
-    delay1 = trainu_con[0:120, [0, 1, 2, 3, 4, 5, 9, 10, 11, 12]] # delayed variables
-    delay1[60:,0:8] = delay1[59,0:8] # untunable variables, unknown for the last 60 points
-    delay1[60:,8] = u1 # CV2 setting
-    delay1[60:,9] = u2 # CV3 setting
-    instant1 = trainu_con[59, [6, 7, 8]] # instant variables 
+def getfreq(u1, u2, trainx_con, trainu_con, model, sc_d, sc_f, target):
+    delay1 = np.zeros((len(trainx_con), 10+2))
+    delay1[:, 0:10] = trainu_con
+    # delay1[60:,0:8] = delay1[59,0:8] # untunable variables, unknown for the last 60 points
+    delay1[:,10] = u1 # CV2 setting
+    delay1[:,11] = u2 # CV3 setting
     frq1 = trainx_con[0:60, :]
 
     
-    delay1 = sc_d.transform(delay1).reshape((1,120,10))
-    instant1 = sc_i.transform(instant1.reshape((1,3)))
-    frq1 = sc_x.transform(frq1.reshape((60,1))).reshape((1,60))
+    delay1 = sc_d.transform(delay1).reshape((1,60,12))
+    frq1 = sc_f.transform(frq1.reshape((60,1))).reshape((1,60))
 
-    optimized_f = model.predict([delay1, instant1, frq1]) # predictions
-    optimized_f_real = sc_x.inverse_transform(optimized_f.reshape(60,1))
+    optimized_f = model(torch.tensor(delay1).float(), torch.tensor(frq1).float()).detach().numpy()
+    optimized_f_real = sc_f.inverse_transform(optimized_f.reshape(60,1))
     optimized_f_real_sq = optimized_f_real**2
+    
+    # import matplotlib.pyplot as plt
+    # test = np.loadtxt('test_sample.txt')
+
+    # plt.plot(optimized_f_real)
+
+    # plt.plot(test[:,-1])
+    # # save the figure
+    # plt.savefig('test.png')
+
     # weights = np.geomspace(1, 1000, 60)
     weights = np.ones(60)
     weights = weights / np.sum(weights)
     weighted_sum = np.sum(optimized_f_real_sq.flatten() * weights)
     return weighted_sum, optimized_f_real
 
-def approximate_hessian(u1, u2, trainu_con, trainx_con, model, sc_x, sc_d, sc_i, target, epsilon=1e-1):
+def approximate_hessian(u1, u2, trainu_con, trainx_con, model, sc_d, sc_f, target, epsilon=1e-1):
     hessian = np.zeros((2, 2))
 
     # Original value of the function
@@ -77,7 +83,7 @@ def approximate_hessian(u1, u2, trainu_con, trainx_con, model, sc_x, sc_d, sc_i,
             u_list.append(np.array([u1_i, u2_i]))
             u_list.append(np.array([u1_j, u2_j]))
             u_list.append(np.array([u1_ij, u2_ij]))
-    objs = objectives(u_list, trainu_con, trainx_con, model, sc_x, sc_d, sc_i, target)
+    objs = objectives(u_list, trainu_con, trainx_con, model, sc_d, sc_f, target)
     f_original = objs[0]
     for i in range(2):
         for j in range(2):
@@ -98,33 +104,33 @@ def perturb(u1, u2, index, epsilon):
         u2 += epsilon
     return u1, u2
 
-def approximate_gradient(u1, u2, trainx_con, trainu_con, model, sc_x, sc_d, sc_i, target, epsilon=.1):
+def approximate_gradient(u1, u2, trainx_con, trainu_con, model, sc_d, sc_f, target, epsilon=.1):
     # Calculate gradients for u1
     u1_perturbed = u1
     u1_perturbed += epsilon
-    grad_u1 = (getfreq(u1_perturbed, u2, trainx_con, trainu_con, model, sc_x, sc_d, sc_i, target)[0] - 
-               getfreq(u1, u2, trainx_con, trainu_con, model, sc_x, sc_d, sc_i, target)[0]) / epsilon
+    grad_u1 = (getfreq(u1_perturbed, u2, trainx_con, trainu_con, model, sc_d, sc_f, target)[0] - 
+               getfreq(u1, u2, trainx_con, trainu_con, model, sc_d, sc_f, target)[0]) / epsilon
         
     # Calculate gradients for u2
     u2_perturbed = u2
     u2_perturbed += epsilon
-    grad_u2 = (getfreq(u1, u2_perturbed, trainx_con, trainu_con, model, sc_x, sc_d, sc_i, target)[0] - 
-               getfreq(u1, u2, trainx_con, trainu_con, model, sc_x, sc_d, sc_i, target)[0]) / epsilon
+    grad_u2 = (getfreq(u1, u2_perturbed, trainx_con, trainu_con, model, sc_d, sc_f, target)[0] - 
+               getfreq(u1, u2, trainx_con, trainu_con, model, sc_d, sc_f, target)[0]) / epsilon
     
     return grad_u1, grad_u2
 
-def newtons_method(u1, u2, iterations, trainx_con, trainu_con, model, sc_x, sc_d, sc_i, target):
-    lower_bound = 5
-    upper_bound = 75
-    max_delta = 2
+def newtons_method(u1, u2, iterations, trainx_con, trainu_con, model, sc_d, sc_f, target, lower_bound=5, upper_bound=75, max_delta=2):
+    # lower_bound = 5
+    # upper_bound = 75
+    # max_delta = 2
     u1_list = []
     u2_list = []
     err_list = []
     update_list = []
     for i in range(iterations):
-        grad = approximate_gradient(u1, u2,trainx_con, trainu_con, model, sc_x, sc_d, sc_i, target)
+        grad = approximate_gradient(u1, u2,trainx_con, trainu_con, model, sc_d, sc_f, target)
         grad_array = np.array([grad[0], grad[1]])
-        hessian = approximate_hessian(u1, u2, trainu_con, trainx_con, model, sc_x, sc_d, sc_i, target)
+        hessian = approximate_hessian(u1, u2, trainu_con, trainx_con, model, sc_d, sc_f, target)
 
 
         # Ensure Hessian is invertible
@@ -161,7 +167,7 @@ def newtons_method(u1, u2, iterations, trainx_con, trainu_con, model, sc_x, sc_d
         # Update parameters
         u1 = u1_update
         u2 = u2_update
-        err1, optimized_f_real = getfreq(u1, u2, trainx_con, trainu_con, model, sc_x, sc_d, sc_i, target)
+        err1, optimized_f_real = getfreq(u1, u2, trainx_con, trainu_con, model, sc_d, sc_f, target)
         err_list.append(err1)
         u1_list.append(u1)
         u2_list.append(u2)
@@ -169,9 +175,9 @@ def newtons_method(u1, u2, iterations, trainx_con, trainu_con, model, sc_x, sc_d
     best_idx = np.argmin(err_list)
     return u1_list[best_idx], u2_list[best_idx],  update_list, u1_list, u2_list
 
-def run_newtons_method(u1, u2, trainx_con, trainu_con, model, sc_x, sc_d, sc_i):
+def run_newtons_method(u1, u2, trainx_con, trainu_con, model, sc_d, sc_f, lower_bound=5, upper_bound=75, max_delta=2):
     target = np.zeros((1, 60))
     iterations = 1
 
-    u1, u2, update_list, u1_list, u2_list = newtons_method(u1, u2, iterations, trainx_con, trainu_con, model, sc_x, sc_d, sc_i,  target)
+    u1, u2, update_list, u1_list, u2_list = newtons_method(u1, u2, iterations, trainx_con, trainu_con, model, sc_d, sc_f,  target, lower_bound, upper_bound, max_delta)
     return u1, u2#, update_list, u1_list, u2_list
